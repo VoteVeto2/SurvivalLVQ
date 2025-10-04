@@ -1,0 +1,11 @@
+matplotlib
+numpy
+pandas
+scikit_learn
+scikit_survival
+scipy
+SurvSet
+torch
+torchvision
+torchaudio
+jupyter
