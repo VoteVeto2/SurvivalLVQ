@@ -12,7 +12,7 @@ warnings.filterwarnings('ignore')
 
 class SurvivalLVQ(torch.nn.Module, BaseEstimator):
     def __init__(self, n_prototypes=2, n_omega_rows=None, batch_size=128,
-                 init='kmeans', device=torch.device("cpu"), lr=1e-3, epochs=50, verbose=True):
+                 init='kmeans', device=torch.device("cpu"), lr=1e-3, epochs=50, verbose=True, random_state=None):
         """
         Initializes the SurvivalLVQ model.
 
@@ -28,6 +28,7 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
             lr (float): The learning rate for the optimizer.
             epochs (int): The number of training epochs.
             verbose (bool): If True, prints the loss at each epoch.
+            random_state (int, optional): Random seed for reproducibility. If None, uses random initialization.
         """
         super().__init__()
         self.n_prototypes = n_prototypes
@@ -38,6 +39,7 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         self.init = init
         self.verbose = verbose
         self.batch_size = batch_size
+        self.random_state = random_state
 
     # initializes the model
     def _init_model(self, datapoints, D, T):
@@ -80,12 +82,17 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         datapoints_imputed = imp.fit_transform(self.datapoints.numpy())
         Y = Surv().from_arrays(self.D.numpy().astype('?'), self.T.numpy())
 
-        if self.n_omega_rows < self.n_features: 
+        if self.n_omega_rows < self.n_features:
             # If n < p, use the pseudo inverse to approximate the identity matrix for lambda:
             # (omega^T)^-1 * omega^T * omega =  (omega^T)^-1 * I -->
             # omega = (omega^T)^-1 = approx I
-            self.omega = torch.rand(size=(self.n_omega_rows, self.n_features), dtype=torch.float32,
-                                    device=self.device)
+            if self.random_state is not None:
+                generator = torch.Generator(device=self.device).manual_seed(self.random_state)
+                self.omega = torch.rand(size=(self.n_omega_rows, self.n_features), dtype=torch.float32,
+                                        device=self.device, generator=generator)
+            else:
+                self.omega = torch.rand(size=(self.n_omega_rows, self.n_features), dtype=torch.float32,
+                                        device=self.device)
             self.omega = torch.pinverse(self.omega.T)
         else:
             # use identity matrix as initial omega and thus lambda: every feature is weighted equally at start.
@@ -94,15 +101,20 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         if self.init == 'kmeans':
             # fit kmeans on datapoints
             pass
-            clf = KMeans(n_clusters=self.n_prototypes, n_init=1).fit(datapoints_imputed)
+            clf = KMeans(n_clusters=self.n_prototypes, n_init=1, random_state=self.random_state).fit(datapoints_imputed)
 
             # set initial prototype locations to the k-means.
             self.w = torch.tensor((clf.cluster_centers_), dtype=torch.float32, device=self.device)
 
         else:
             # random init of prototypes
-            self.w = torch.mean(torch.tensor(datapoints_imputed, dtype=torch.float32), axis=0) * 0.01 * \
-                     torch.randn(self.n_prototypes, datapoints.size(dim=1), dtype=torch.float32, device=self.device)
+            if self.random_state is not None:
+                generator = torch.Generator(device=self.device).manual_seed(self.random_state)
+                self.w = torch.mean(torch.tensor(datapoints_imputed, dtype=torch.float32), axis=0) * 0.01 * \
+                         torch.randn(self.n_prototypes, datapoints.size(dim=1), dtype=torch.float32, device=self.device, generator=generator)
+            else:
+                self.w = torch.mean(torch.tensor(datapoints_imputed, dtype=torch.float32), axis=0) * 0.01 * \
+                         torch.randn(self.n_prototypes, datapoints.size(dim=1), dtype=torch.float32, device=self.device)
 
         # some pytorch admin.
         self.datapoints = self.datapoints.to(self.device)
@@ -381,9 +393,19 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
 
         dataset = torch.utils.data.TensorDataset(X, T, D) # creates a dataset of the data, time, and event indicator
 
+        # Create generators for reproducibility
+        if self.random_state is not None:
+            sampler_generator = torch.Generator().manual_seed(self.random_state)
+            loader_generator = torch.Generator().manual_seed(self.random_state + 1)
+        else:
+            sampler_generator = None
+            loader_generator = None
+
         random_sampler = torch.utils.data.RandomSampler(dataset, replacement=False,
-                                                        num_samples=self.batch_size - (X.size(0) % self.batch_size))
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=False)
+                                                        num_samples=self.batch_size - (X.size(0) % self.batch_size),
+                                                        generator=sampler_generator)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=False,
+                                                 generator=loader_generator)
         
         # The optimizer updates the learnable parameters w and omega
         # A smaller lr is often used for the relevance matrix for more stable updates.
