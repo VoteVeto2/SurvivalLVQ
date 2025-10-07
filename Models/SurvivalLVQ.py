@@ -7,28 +7,27 @@ from scipy.interpolate import interp1d
 from sklearn.base import BaseEstimator
 from sksurv.util import Surv
 import warnings
+from typing import Optional, Tuple, List
+from numpy.typing import NDArray
+
 warnings.filterwarnings('ignore')
 
 
 class SurvivalLVQ(torch.nn.Module, BaseEstimator):
-    def __init__(self, n_prototypes=2, n_omega_rows=None, batch_size=128,
-                 init='kmeans', device=torch.device("cpu"), lr=1e-3, epochs=50, verbose=True, random_state=None):
+    def __init__(
+        self, 
+        n_prototypes: int = 2, 
+        n_omega_rows: Optional[int] = None, 
+        batch_size: int = 128,
+        init: str = 'kmeans', 
+        device: torch.device = torch.device("cpu"), 
+        lr: float = 5e-3, 
+        epochs: int = 50, 
+        verbose: bool = True, 
+        random_state: Optional[int] = None
+    ) -> None:
         """
         Initializes the SurvivalLVQ model.
-
-        Args:
-            n_prototypes (int): The number of prototypes to learn.
-            n_omega_rows (int, optional): The number of rows for the omega matrix, which determines the
-                                          rank of the relevance matrix. If None, it's set to the number
-                                          of features (full-rank). A smaller value can act as regularization.
-            batch_size (int): The size of mini-batches for training.
-            init (str): The initialization method for prototypes. 'kmeans' uses K-Means cluster centers,
-                        'random' initializes them randomly.
-            device (torch.device): The device to run the model on ('cpu' or 'cuda').
-            lr (float): The learning rate for the optimizer.
-            epochs (int): The number of training epochs.
-            verbose (bool): If True, prints the loss at each epoch.
-            random_state (int, optional): Random seed for reproducibility. If None, uses random initialization.
         """
         super().__init__()
         self.n_prototypes = n_prototypes
@@ -42,15 +41,10 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         self.random_state = random_state
 
     # initializes the model
-    def _init_model(self, datapoints, D, T):
+    def _init_model(self, datapoints: torch.Tensor, D: torch.Tensor, T: torch.Tensor) -> None:
         """
         Initializes all model components, parameters, and pre-computes necessary values.
         This is called once at the beginning of the `fit` method.
-
-        Args:
-            datapoints (torch.Tensor): The input feature data.
-            D (torch.Tensor): The event/censoring indicator (1 for event, 0 for censored).
-            T (torch.Tensor): The time to event or censoring.
         """
         self.n_features = datapoints.shape[1]   # dim of features
         self.datapoints = datapoints
@@ -140,18 +134,15 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         self.c = self._calc_labels()
         self.normalize_trace() # make the total feature relevance sum = 1.
 
-    def estimate_kaplan_meier(self, d, t, weights=None):
+    def estimate_kaplan_meier(
+        self, 
+        d: torch.Tensor, 
+        t: torch.Tensor, 
+        weights: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Calculates the Kaplan-Meier survival curve estimator.
         Can handle weighted samples.
-
-        Args:
-            d (torch.Tensor): Event indicator (1 for event, 0 for censored).
-            t (torch.Tensor): Time to event/censoring.
-            weights (torch.Tensor, optional): Sample weights. Defaults to uniform weights.
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor]: A tuple of unique times and corresponding survival probabilities.
         """
         if weights is None:
             weights = torch.ones_like(d)
@@ -166,13 +157,13 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         surv = (1 - d_i / n_i).cumprod(0)
         return t_unique, surv
 
-    def lambda_mat(self):
+    def lambda_mat(self) -> torch.Tensor:
         """
         Computes the relevance matrix Lambda = Omega^T * Omega.
         """
         return self.omega.T @ self.omega
 
-    def fit_labels(self):
+    def fit_labels(self) -> None:
         """
         Recalculates the prototype labels (survival curves). Called at the start of each epoch.
         """
@@ -180,7 +171,14 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
 
     # fuction to calculate the IPCW weights for each timepoint in timepoints and sample in D and T
     # note that last weights are ill defined if last (in time) datapoint is censored
-    def _calc_IPCW_weights(self, timepoints, D, T, G_t, G_t_unique):
+    def _calc_IPCW_weights(
+        self, 
+        timepoints: torch.Tensor, 
+        D: torch.Tensor, 
+        T: torch.Tensor, 
+        G_t: torch.Tensor, 
+        G_t_unique: torch.Tensor
+    ) -> torch.Tensor:
         T_i_smaller_eq_t = T[:, None] <= timepoints
         T_i_greater_t = ~T_i_smaller_eq_t
 
@@ -194,11 +192,11 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         return alpha
 
     # function to set the prototype labels
-    def _calc_labels(self):
+    def _calc_labels(self) -> torch.Tensor:
         # prepare the data for the calculation of the labels
-        x = self.datapoints                # data points
-        w_local = self.w.detach()          # prototypes, detach to not mess with the gradient graph(back-prop)
-        omega_local = self.omega.detach()  # relevance matrix, detach to not mess with the gradient graph(back-prop)
+        x = self.datapoints                         # data points
+        w_local = self.w.detach()                   # prototypes, detach to not mess with the back-prop
+        omega_local = self.omega.detach()           # relevance matrix, detach to not mess with the back-prop
         
         # compute distance between data points and prototypes
         d = self._omega_distance(x, w_local, omega_local) 
@@ -207,9 +205,9 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         q_ij = self._q_ij(d).cpu()
 
         # find the prototype with the highest assignment probability for each data point
-        max_prob = q_ij.max(dim=0).values         # max probability for each data point
-        mask = (q_ij == max_prob.unsqueeze(0))    # True if prototype wins
-        q_ij = mask * 1.0                         # winner takes all
+        max_prob = q_ij.max(dim=0).values           # max probability for each data point
+        mask = (q_ij == max_prob.unsqueeze(0))      # True if prototype wins
+        q_ij = mask * 1.0                           # winner takes all
 
         # weighted Kaplan-Meier per prototype
         kap_mei_w = torch.zeros((self.n_prototypes, self.n_timepoints)) # initialize the survival curve for each prototype
@@ -234,7 +232,7 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         return kap_mei_w
 
     # predict the individual survival curve functions based on closest two prototypes.
-    def predict_survival_function(self, x):
+    def predict_survival_function(self, x: NDArray) -> List[interp1d]:
         with torch.no_grad():
             x = torch.tensor(x, dtype=torch.float32)
             pred = self.predict_curves(x)
@@ -242,7 +240,7 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
                     range(x.size(dim=0))]
 
     # 'risk score' for scikit learn
-    def predict(self, X, closest=False):
+    def predict(self, X: NDArray, closest: bool = False) -> NDArray:
         if closest:
             with torch.no_grad():
                 X = torch.tensor(X, dtype=torch.float32)
@@ -258,14 +256,14 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
                 return pred.numpy()
 
     # 'risk score' (inverse area under the survival curve).
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         pred = self.predict_curves(x)
         res = -torch.trapezoid(pred, self.timepoints) / self.timepoints.max()
         if torch.sum(torch.isnan(res) > 0):
             pass
         return res
 
-    def predict_closest(self, X):
+    def predict_closest(self, X: NDArray) -> NDArray:
         with torch.no_grad():
             X = torch.tensor(X, dtype=torch.float32)
             X = X.to(self.device)  # Fix: assign the result back to X
@@ -275,58 +273,45 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
             return d.cpu().min(dim=0).indices.numpy()
 
     # Finding closest prototypes
-    def _q_ij(self, d):
+    def _q_ij(self, d: torch.Tensor) -> torch.Tensor:
         """
         Calculates the assignment probability for a sample to its two closest prototypes.
         p_j = d_k / (d_j + d_k), where j and k are the two closest prototypes.
-        This means the closer a point is to a prototype, the higher its assignment probability.
-        
-        Args:
-            d (torch.Tensor): Distances from samples to prototypes, shape (n_prototypes, n_samples).
-
-        Returns:
-            torch.Tensor: Assignment probabilities, shape (n_prototypes, n_samples).
         """
         top2_val, top2_i = d.topk(2, axis=0, largest=False)
+
         # flip the distances with flipud to make pj = dk / (dj + dk) and vice versa.
-        p = torch.flipud(top2_val) / top2_val.sum(dim=0)[None, :]
+        p = torch.flipud(top2_val) / top2_val.sum(dim=0)[None, :]          
         res = torch.scatter(torch.zeros_like(d), dim=0, index=top2_i, src=p)
         return res
 
     # the learnable distance function
-    def _omega_distance(self, x1, w, omega):
+    def _omega_distance(self, x1: torch.Tensor, w: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
         """
         Calculates the learnable distance d^2 = (x - w) * Lambda * (x - w)^T
-        where Lambda = omega^T * omega.
-
-        Args:
-            x1 (torch.Tensor): Data points.
-            w (torch.Tensor): Prototypes.
-            omega (torch.Tensor): Relevance matrix component.
-
-        Returns:
-            torch.Tensor: The squared distances.
+        where Lambda = Omega^T * Omega.
         """
-        diff = x1 - w[:, None, :] 
-        # w[:, None, :] is a 2D tensor with shape (n_prototypes, 1, n_features)
+        diff = x1 - w[:, None, :]  # Shape: (n_prototypes, n_samples, n_features)
 
-        # set nan diffs to 0 for NaN-LVQ
+        # Handle missing values for NaN-LVQ
         diff = torch.nan_to_num(diff)
+        
+        # Compute quadratic distance: (diff @ Omega^T @ Omega @ diff^T)
         dists = (diff @ omega.transpose(dim0=-2, dim1=-1) @ omega)[:, :, None, :] @ diff[:, :, :, None]
-        # [:, :, None, :] is a 3D tensor with shape (n_prototypes, n_samples, 1, n_features)
-        # [:, :, :, None] is a 3D tensor with shape (n_prototypes, n_samples, n_features, 1)
-        return dists.squeeze(-1).squeeze(-1) # .squeeze(-1).squeeze(-1) is to remove the last two dimensions of the tensor
+        
+        # Remove singleton dimensions: (n_prototypes, n_samples, 1, 1) -> (n_prototypes, n_samples)
+        return dists.squeeze(-1).squeeze(-1)
 
-    def normalize_trace(self):
+    def normalize_trace(self) -> None:
         """Normalize the matrix such that the trace is 1.
         shape of `mat`: (input_dim, mapping_dim) or (k, input_dim, mapping_dim)
         """
         with torch.no_grad():
-            omega = self.omega.to(self.device)
-            trace_norm = omega / torch.sqrt(torch.trace(omega.t() @ omega))
+            omega: torch.Tensor = self.omega.to(self.device)
+            trace_norm: torch.Tensor = omega / torch.sqrt(torch.trace(omega.t() @ omega))
             self.omega.copy_(trace_norm.cpu())
 
-    def predict_curves(self, x):
+    def predict_curves(self, x: torch.Tensor) -> torch.Tensor:
         x = x.to(self.device)
         w = self.w
         omega = self.omega
@@ -337,7 +322,7 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         pred = pred.sum(dim=0)
         return pred.cpu()
 
-    def loss_brier(self, x, t=None, d=None):
+    def loss_brier(self, x: torch.Tensor, t: Optional[torch.Tensor] = None, d: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Calculates the Brier score loss, a measure of the accuracy of probabilistic predictions.
         It is defined as the mean squared error between the predicted survival probabilities and the actual survival status.
@@ -374,26 +359,25 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
     # X = data
     # y[0] = delta
     # y[1] = time
-    def fit(self, X, y):
+    def fit(self, X: NDArray, y: NDArray) -> 'SurvivalLVQ':
         """
-        Fits the model to the training data.
-        Updating the prototypes and the relevance matrix.
+        Train SurvivalLVQ by jointly updating:
+            - prototypes self.w
+            - metric factor self.omega  (Lambda = omega^T @ omega)
+        using a mini-batch, IPCW-weighted discrete IBS loss.
+        """
 
-        Args:
-            X (np.ndarray): The input feature data.
-            y (structured np.ndarray): A structured array from scikit-survival containing
-                                       the event indicator and time to event.
-        """
-        X = torch.tensor(X, dtype=torch.float32)
+        # --- 1. prepare the data for torch tensors ---
+        X = torch.tensor(X, dtype=torch.float32)     # data: (n_samples, n_features)
         D, T = map(np.array, zip(*y))
-        D = torch.tensor(D, dtype=torch.float32)
-        T = torch.tensor(T, dtype=torch.float32)
+        D = torch.tensor(D, dtype=torch.float32)     # censored indicator
+        T = torch.tensor(T, dtype=torch.float32)     # observed time
+        # initializes the model
+        self._init_model(X, D, T)                   
+        # create a dataset for the dataloader(features, time, censoring)
+        dataset = torch.utils.data.TensorDataset(X, T, D) 
 
-        self._init_model(X, D, T) # initializes the model
-
-        dataset = torch.utils.data.TensorDataset(X, T, D) # creates a dataset of the data, time, and event indicator
-
-        # Create generators for reproducibility
+        # for reproducibility 
         if self.random_state is not None:
             sampler_generator = torch.Generator().manual_seed(self.random_state)
             loader_generator = torch.Generator().manual_seed(self.random_state + 1)
@@ -401,54 +385,54 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
             sampler_generator = None
             loader_generator = None
 
+        # create a random sampler for the dataloader
         random_sampler = torch.utils.data.RandomSampler(dataset, replacement=False,
                                                         num_samples=self.batch_size - (X.size(0) % self.batch_size),
                                                         generator=sampler_generator)
+        # create a dataloader for mini-batch training
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=False,
                                                  generator=loader_generator)
         
-        # The optimizer updates the learnable parameters w and omega
-        # A smaller lr is often used for the relevance matrix for more stable updates.
+        # --- 2. Optimeizer w/ 2 param groups: prototypes and relevance matrix ---
         optimizer_w = torch.optim.Adam([
-            {'params': self.w}, # prototypes
-            {'params': self.omega, 'lr': self.lr * 0.1}], lr=self.lr) # relevance matrix
+            {'params': self.w},                          # prototypes
+            {'params': self.omega, 'lr': self.lr * 0.1}  # relevance matrix with smaller lr
+            ], 
+            lr=self.lr) 
 
-        # ---------- Training loop ----------
+        # --- 3. Training loop -------------------------
         for epoch in range(self.epochs):
-            # At the start of each epoch, we recalculate the prototype labels
-            # based on their updated positions.
-            self.fit_labels()
-            minibatch_loss = []
-            for batch in dataloader:
-                x_batch, t_batch, d_batch = batch
+            self.fit_labels()       # recalculate prototype labels
+            minibatch_loss = []     # store the loss for each mini-batch
+            # iterate over mini-batches
+            for batch in dataloader:    
+                x_batch, t_batch, d_batch = batch 
 
-                # fill up the batch if not full:
+                # if the last batch is smaller than batch_size, fill it up with random samples
                 if x_batch.size(0) < self.batch_size:
-                    ids = list(random_sampler)
-                    x_batch = torch.cat([x_batch, X[ids]])
+                    ids = list(random_sampler)              # get random indices to fill up the batch
+                    x_batch = torch.cat([x_batch, X[ids]])  # fill up the batch for x, t, d
                     t_batch = torch.cat([t_batch, T[ids]])
                     d_batch = torch.cat([d_batch, D[ids]])
 
-                optimizer_w.zero_grad()  # Reset gradients
-                batch_loss = self.loss_brier(x_batch, t_batch, d_batch)
-                minibatch_loss.append(batch_loss)
-                batch_loss.backward()  # backpropagate the loss
-                optimizer_w.step()     # update weights
-                self.normalize_trace() # regularization
+                optimizer_w.zero_grad()                     # Reset gradients
+                batch_loss = self.loss_brier(x_batch, t_batch, d_batch) # compute the loss
+                minibatch_loss.append(batch_loss)           # store the loss for each mini-batch
+                batch_loss.backward()                       # backpropagate the loss
+                optimizer_w.step()                          # update weights
+                self.normalize_trace()                      # regularization
 
             if self.verbose:
-                epoch_loss = torch.tensor(minibatch_loss).mean()
-                print(f"Epoch: {epoch + 1} / {self.epochs} | Loss: {epoch_loss:.6f}")
+                epoch_loss = torch.tensor(minibatch_loss).mean()                             # average loss over all mini-batches
+                print(f"Epoch: {epoch + 1} / {self.epochs} | Loss: {epoch_loss:.6f}")      
         return self
 
 
     # Function to visualize specific aspects of the model.
-    def vis(self, X, D, T, print_variance_covered=True, true_eigen=False):
+    def vis(self, X: NDArray, D: NDArray, T: NDArray, print_variance_covered: bool = True, true_eigen: bool = False) -> None:
         X = torch.tensor(X, dtype=torch.float32)
 
-        ##
         ## projection plot (scatter)
-        ##
         plt.figure()
         with torch.no_grad():
             v, u = torch.linalg.eig(self.lambda_mat())
@@ -503,9 +487,7 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         plt.xlabel("projection on 1st eigenv. of  $\lambda$")
         plt.ylabel("projection on 2nd eigenv. of  $\lambda$")
 
-        ##
         ## label plots
-        ##
         ax2 = plt.figure()
         ax2.clear()
         for i in range(w_proj.size(0)):
@@ -519,9 +501,7 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
             print('variance coverd by projection:',
                   v[idx][:2].sum() / v.sum() * 100)
 
-        ##
         ## relevance matrix plot
-        ##
         rel_mat = self.lambda_mat().detach().numpy()
         fig = plt.matshow(rel_mat)
         cbar = plt.colorbar(fig)
@@ -531,18 +511,14 @@ class SurvivalLVQ(torch.nn.Module, BaseEstimator):
         plt.xlabel("feature number")
         plt.ylabel("feature number")
 
-        ##
         ## feature relevance plot
-        ##
         plt.figure()
         fig = plt.bar(range(rel_mat.shape[1]), np.diag(rel_mat))
         plt.xticks(range(rel_mat.shape[1]))
         plt.xlabel('Feature number')
         plt.ylabel('relevance')
 
-        ##
         ## eigen value  plot
-        ##
         plt.figure()
         fig = plt.bar(range(rel_mat.shape[1]), v)
         plt.xticks(range(rel_mat.shape[1]))
